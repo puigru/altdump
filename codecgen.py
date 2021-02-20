@@ -24,7 +24,7 @@ class StringReader():
         return peeked
 
     def consume_whitespace(self):
-        while self.peek() in ' \r\n\t':
+        while self.peek() and self.peek() in ' \r\n\t':
             self.consume()
 
     def consume_until(self, substr):
@@ -95,15 +95,26 @@ class ClassWriter():
         self.buf.write(line + '\n')
         return self
 
-class TypeCodecInfo():
-    def __init__(self, info_type, type_name, optional, vector):
+class CodecInfo():
+    def __init__(self, info_type, optional):
         self.info_type = info_type
-        self.type_name = type_name
         self.optional = optional
-        self.vector = vector
+
+class TypeCodecInfo(CodecInfo):
+    def __init__(self, info_type, type_name, optional):
+        super().__init__(info_type, optional)
+        self.type_name = type_name
 
     def __repr__(self):
         return f'<info={self.info_type},type={self.type_name},optional={self.optional}>'
+
+class CollectionCodecInfo(CodecInfo):
+    def __init__(self, element_type, optional):
+        super().__init__('CollectionCodecInfo', optional)
+        self.element_type = element_type
+
+    def __repr__(self):
+        return f'<collection={self.element_type},optional={self.optional}>'
 
 class TypeInfoReader(StringReader):
     def __init__(self, expr):
@@ -120,19 +131,18 @@ class TypeInfoReader(StringReader):
         if info_type == 'TypeCodecInfo' or info_type == 'EnumCodecInfo':
             type_name = self.consume_until(',')
             optional = self.consume_until(')') == 'true'
-            vector = False
+            type_info = TypeCodecInfo(info_type, type_name, optional)
         elif info_type == 'CollectionCodecInfo':
-            # optional attribute of CollectionCodecInfo is unused,
-            # take optional attribute from nested type instead
-            nested_info = self.read()
-            info_type = nested_info.info_type
-            type_name = nested_info.type_name
-            optional = nested_info.optional
-            vector = True
+            element_type = self.read()
+            self.expect(',')
+            optional = self.consume_until(',') == 'true'
+            level = self.consume_until(')')
+            assert level == '1'
+            type_info = CollectionCodecInfo(element_type, optional)
         else:
             raise ValueError(f'Unknown TypeCodecInfo type: {info_type}')
 
-        return TypeCodecInfo(info_type, type_name, optional, vector)
+        return type_info
 
 class ModelDefinition():
     def update_references(self, codecs):
@@ -319,24 +329,17 @@ class CodecDefinitionWriter():
         'Number': 'packet.readDouble()',
         'Boolean': 'bool(packet.readByte())',
         'String': 'packet.readString()',
-        'IGameObject': 'packet.readLong()'
+        'IGameObject': 'packet.readLong()',
+        'Date': 'packet.readLong()'
     }
     def __init__(self, codecs):
         self.codecs = codecs
 
-    def write(self, codec):
-        dependencies = list()
-        if codec.inherits != 'Codec':
-            dependencies.append(self.codecs[codec.inherits])
-        writer = ClassWriter()
-        writer.line(f'class {codec.name}({codec.inherits}):').up()
-        if not codec.fields:
-            writer.line('pass')
-            return writer.buf.getvalue(), dependencies
-        writer.line('def read(self, packet, optional):').up()
-        writer.line('data = super().read(packet, optional)')
-        for field, type_info in codec.fields.items():
-            call = None
+    def emit_type_call(self, type_info, dependencies):
+        call = None
+        if type_info.info_type == 'CollectionCodecInfo':
+            call = self.emit_type_call(type_info.element_type, dependencies)
+        else:
             field_type = type_info.type_name
             if type_info.info_type == 'EnumCodecInfo':
                 field_type = 'int'
@@ -350,18 +353,33 @@ class CodecDefinitionWriter():
                     dependencies.append(field_codec)
             elif field_type.endswith('Resource'):
                 call = 'packet.readLong()'
-            else:
-                print(f'Cannot decode: {field_type}')
-                continue
 
-            if type_info.optional:
-                call = f'None if optional.next() else {call}'
+        if not call:
+            return None
 
-            if type_info.vector:
-                writer.line('items = list()')
-                writer.line('for _ in range(protocol.decode_length(packet)):').up()
-                writer.line(f'items.append({call})').down()
-                call = 'items'
+        if type_info.info_type == 'CollectionCodecInfo':
+            call = f'[{call} for _ in range(protocol.decode_length(packet))]'
+
+        if type_info.optional:
+            call = f'None if optional.next() else {call}'
+
+        return call
+
+    def write(self, codec):
+        dependencies = list()
+        if codec.inherits != 'Codec':
+            dependencies.append(self.codecs[codec.inherits])
+        writer = ClassWriter()
+        writer.line(f'class {codec.name}({codec.inherits}):').up()
+        if not codec.fields:
+            writer.line('pass')
+            return writer.buf.getvalue(), dependencies
+        writer.line('def read(self, packet, optional):').up()
+        writer.line('data = super().read(packet, optional)')
+        for field, type_info in codec.fields.items():
+            call = self.emit_type_call(type_info, dependencies)
+            if not call:
+                print('Cannot decode:', type_info)
             writer.line(f"data['{field}'] = {call}")
 
         writer.line('return data')
