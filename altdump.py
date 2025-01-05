@@ -175,12 +175,8 @@ class ProtocolEventReader(PacketReader):
             while packet.bytesAvailable():
                 try:
                     command = decoder.decode(packet, optional_map)
-                except:
-                    traceback.print_exc()
-                    dummy = protocol.SpaceCommand(None, None)
-                    dummy.data = base64.b64encode(packet.data).decode()
-                    self.queue.append(CommandEvent(record, self.i, dummy))
-                    return
+                except Exception as e:
+                    raise Exception(f'Unable to decode space command') from e
 
                 # upgrade connection if necessary
                 if not space_conn and command.command_id == 3:

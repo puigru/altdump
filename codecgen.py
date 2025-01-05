@@ -2,6 +2,7 @@
 import collections
 import datetime
 import argparse
+import traceback
 import json
 import glob
 import os
@@ -37,10 +38,11 @@ class StringReader():
         return consumed
 
     def expect(self, *args):
-        substr = ''.join(args)
-        length = len(substr)
-        if self.string[self.cursor:self.cursor+length] != substr:
-            raise ValueError('Expected substring not matched')
+        expected = ''.join(args)
+        length = len(expected)
+        actual = self.string[self.cursor:self.cursor+length]
+        if actual != expected:
+            raise ValueError(f"Expected substring '{expected}' not matched. Got '{actual}' instead. Remaining in buffer: {self.peek_remaining()}")
         self.cursor += length
 
 class ClassReader(StringReader):
@@ -253,7 +255,12 @@ class ModelDefinitionReader(ClassReader):
 
         for var, type_info in self.method_types.items():
             method_name, param = var.split('_')
-            model = models[method_name]
+            try:
+                model = models[method_name]
+            except KeyError:
+                print('models=', models)
+                traceback.print_exc()
+                break
             model.fields[param] = type_info
 
         return models.values()
@@ -407,7 +414,7 @@ def generate(path, filename, comments=None):
             codec = reader.read()
             codecs[codec.name] = codec
         except ValueError:
-            print(f'Cannot read: {reader.package}.{reader.class_name}')
+            print(f'Cannot read codec: {reader.package}.{reader.class_name}')
 
     server_models = dict()
     for code in classes_by_keyword(path, 'ModelServer'):
@@ -415,12 +422,22 @@ def generate(path, filename, comments=None):
             continue
 
         reader = ModelServerDefinitionReader(code.string)
-        server_models[reader.class_name] = reader.get_type_definitions()
+        try:
+            server_models[reader.class_name] = reader.get_type_definitions()
+        except:
+            print(f'Cannot read ModelServer: {reader.package}.{reader.class_name}')
+            traceback.print_exc()
 
     models = list()
     for code in classes_by_keyword(path, 'extends Model', sort=True):
         reader = ModelDefinitionReader(code.string)
-        for model in reader.get_type_definitions():
+        try:
+            type_defs = reader.get_type_definitions()
+        except:
+            print(f'Cannot read ModelBase: {reader.package}.{reader.class_name}')
+            traceback.print_exc()
+            continue
+        for model in type_defs:
             model.update_references(codecs)
             models.append(model)
         models += server_models[reader.server_model]
