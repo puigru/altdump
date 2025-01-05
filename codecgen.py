@@ -19,6 +19,13 @@ class StringReader():
     def peek_remaining(self):
         return self.string[self.cursor:]
 
+    def peek_until(self, substr):
+        try:
+            index = self.string[self.cursor:].index(substr)
+        except ValueError:
+            index = len(self.string) - 1
+        return self.string[self.cursor:self.cursor+index]
+
     def consume(self):
         peeked = self.peek()
         self.cursor += 1
@@ -29,12 +36,8 @@ class StringReader():
             self.consume()
 
     def consume_until(self, substr):
-        try:
-            index = self.string[self.cursor:].index(substr)
-        except ValueError:
-            index = len(self.string) - 1
-        consumed = self.string[self.cursor:self.cursor+index]
-        self.cursor += index + len(substr)
+        consumed = self.peek_until(substr)
+        self.cursor += len(consumed) + len(substr)
         return consumed
 
     def expect(self, *args):
@@ -50,6 +53,7 @@ class ClassReader(StringReader):
         super().__init__(code)
         self.package = self.read_package()
         self.class_name = self.read_class_name().rstrip()
+        self.consume_until('{')
 
     def read_package(self):
         self.expect('package ')
@@ -71,6 +75,19 @@ class ClassReader(StringReader):
 
             assignments.append(line.split(' = '))
         return assignments, discards
+
+    def read_vars(self):
+        vars = dict()
+        while True:
+            self.consume_whitespace()
+            line = self.peek_until(';')
+            if 'var' not in line:
+                break
+            self.expect(line)
+            self.expect(';')
+            var = line.split(' = ', 2)
+            vars[var[0]] = var[1] if len(var) == 2 else None
+        return vars
 
     def read_get_long(self, expr):
         expr.expect('Long.getLong(')
@@ -197,6 +214,7 @@ class ModelDefinitionReader(ClassReader):
         return method_ids, method_types
 
     def read_method_ids(self):
+        vars = self.read_vars()
         self.consume_until('public function ')
         self.expect(self.class_name, '()')
         self.consume_whitespace()
@@ -204,6 +222,16 @@ class ModelDefinitionReader(ClassReader):
         self.consume_whitespace()
 
         method_ids = dict()
+        # new versions of JPEXS initialize fields in field declarations instead of in class constructors
+        for var, expr in vars.items():
+            if not expr:
+                continue
+            if 'getLong' not in expr:
+                continue
+            var = var[12:-7].lstrip('_') # private var _<field>Id:Long
+            expr = StringReader(expr)
+            method_ids[var] = self.read_get_long(expr)
+
         assignments, _ = self.read_assignments()
         for var, expr in assignments:
             if 'Id' not in var:
@@ -270,6 +298,7 @@ class ModelServerDefinitionReader(ModelDefinitionReader):
         super().__init__(code)
 
     def read_methods(self):
+        vars = self.read_vars()
         self.consume_until('public function ')
         self.expect(self.class_name, '(param1:IModel)')
         self.consume_whitespace()
@@ -277,6 +306,15 @@ class ModelServerDefinitionReader(ModelDefinitionReader):
         self.consume_whitespace()
 
         method_ids, method_types = dict(), dict()
+        # new versions of JPEXS initialize fields in field declarations instead of in class constructors
+        for var, expr in vars.items():
+            if not expr:
+                continue
+            if 'getLong' in expr:
+                var = var[13:-7] # private var _<field>Id:Long
+                expr = StringReader(expr)
+                method_ids[var] = self.read_get_long(expr)
+
         assignments, _ = self.read_assignments()
         for var, expr in assignments:
             if 'getLong' in expr:
