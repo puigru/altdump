@@ -441,6 +441,7 @@ def generate(path, filename, comments=None):
         for line in comments:
             prelude.line(f'# {line}')
 
+    prelude.line('from alternativa.tankstate import TankState')
     prelude.line('from alternativa.model import Codec')
     prelude.line('from alternativa import protocol')
     sections = [prelude.buf.getvalue()]
@@ -450,6 +451,10 @@ def generate(path, filename, comments=None):
     while to_write:
         codec = to_write.pop()
         if codec in written:
+            continue
+        # special codec (imported in prelude)
+        if codec.name == 'TankState':
+            written.add(codec)
             continue
         if codec.code:
             sections.append(codec.code)
